@@ -310,6 +310,13 @@ fn exec(cmd: &mut Command) -> ! {
     panic!("failed to exec `{}`: {}", cmd_d, error);
 }
 
+#[cfg(windows)]
+fn exec(cmd: &mut Command) -> ! {
+    let cmd_d = format!("{:?}", cmd);
+    let error = "Not implemented";
+    panic!("failed to exec `{}`: {}", cmd_d, error);
+}
+
 #[cfg(unix)]
 fn raise_priority() {
     unsafe {

@@ -13,7 +13,6 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-libc = "0.2"
 chrono = "0.4"
 lazy_static = "1"
 semver = "0.9"
@@ -29,6 +28,13 @@ num_cpus = "1.13"
 jobserver = "0.1.21"
 crossbeam-utils = "0.7"
 snap = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+miow = "0.3"
+winapi = { version = "0.3", features = ["winerror"] }
 
 [[bin]]
 name = "collector"
