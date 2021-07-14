@@ -91,6 +91,12 @@ pub async fn handle_compare(
         compare_given_commits(body.start, end.clone(), body.stat, ctxt, &master_commits)
             .await?
             .ok_or_else(|| format!("could not find end commit for bound {:?}", end))?;
+    let num_significant = comparison
+        .get_benchmarks()
+        .iter()
+        .filter(|c| c.is_significant())
+        .count();
+    println!("Num significant {}", num_significant);
 
     let conn = ctxt.conn().await;
     let prev = comparison.prev(&master_commits);
@@ -446,9 +452,15 @@ impl Comparison {
             if let Some(b) = self.b.data.get(bench_name) {
                 for (cache_state, a) in a.iter() {
                     if let Some(b) = b.iter().find(|(cs, _)| cs == cache_state).map(|(_, b)| b) {
+                        let variance_description = self
+                            .benchmark_variances
+                            .as_ref()
+                            .and_then(|b| b.data.get(&format!("{}-{}", bench_name, cache_state)))
+                            .map(|v| v.description.clone());
                         result.push(BenchmarkComparison {
                             bench_name,
                             cache_state,
+                            variance_description,
                             results: (a.clone(), b.clone()),
                         })
                     }
@@ -592,6 +604,12 @@ pub enum BenchmarkVarianceDescription {
     Noisy(f64),
 }
 
+impl BenchmarkVarianceDescription {
+    fn is_noisy(&self) -> bool {
+        matches!(self, Self::HighlyVariable(_) | Self::Noisy(_))
+    }
+}
+
 impl Default for BenchmarkVarianceDescription {
     fn default() -> Self {
         Self::Normal
@@ -628,11 +646,13 @@ pub fn next_commit<'a>(
 pub struct BenchmarkComparison<'a> {
     bench_name: &'a str,
     cache_state: &'a str,
+    variance_description: Option<BenchmarkVarianceDescription>,
     results: (f64, f64),
 }
 
-const SIGNIFICANCE_THRESHOLD: f64 = 0.01;
 impl BenchmarkComparison<'_> {
+    const SIGNIFICANCE_THRESHOLD: f64 = 0.01;
+
     fn log_change(&self) -> f64 {
         let (a, b) = self.results;
         (b / a).ln()
@@ -644,13 +664,14 @@ impl BenchmarkComparison<'_> {
     }
 
     fn is_significant(&self) -> bool {
-        // This particular (benchmark, cache) combination frequently varies
-        if self.bench_name.starts_with("coercions-debug")
-            && self.cache_state == "incr-patched: println"
+        if self
+            .variance_description
+            .map(|v| v.is_noisy())
+            .unwrap_or(false)
         {
             self.relative_change().abs() > 2.0
         } else {
-            self.log_change().abs() > SIGNIFICANCE_THRESHOLD
+            self.log_change().abs() > Self::SIGNIFICANCE_THRESHOLD
         }
     }
 
