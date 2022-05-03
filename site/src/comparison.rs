@@ -123,8 +123,9 @@ pub async fn handle_compare(
     let prev = comparison.prev(master_commits);
     let next = comparison.next(master_commits);
     let is_contiguous = comparison.is_contiguous(&*conn, master_commits).await;
-    let benchmark_map = conn.get_benchmarks().await;
+    let category_map = ctxt.get_benchmark_category_map().await;
 
+    let summary = calculate_summary(comparison.clone(), &category_map).await;
     let comparisons = comparison
         .comparisons
         .into_iter()
@@ -151,11 +152,52 @@ pub async fn handle_compare(
         new_errors,
         next,
         is_contiguous,
-        benchmark_data: benchmark_map
+        benchmark_data: category_map
             .into_iter()
-            .map(|bench| bench.into())
+            .map(|(name, category)| api::comparison::BenchmarkInfo {
+                name: name.to_string(),
+                category: category.to_string(),
+            })
             .collect(),
+        summary,
     })
+}
+
+async fn calculate_summary(
+    comparison: ArtifactComparison,
+    category_map: &HashMap<Benchmark, Category>,
+) -> api::comparison::ComparisonSummary {
+    use api::comparison::{ComparisonSummary, ComparisonSummaryDetail};
+    let (primary, secondary) = comparison.summarize_by_category(category_map);
+    ComparisonSummary {
+        primary_improvements: ComparisonSummaryDetail {
+            count: primary.num_improvements,
+            mean: primary.arithmetic_mean_of_improvements(),
+            max: primary.largest_improvement_percentage(),
+        },
+        primary_regressions: ComparisonSummaryDetail {
+            count: primary.num_regressions,
+            mean: primary.arithmetic_mean_of_regressions(),
+            max: primary.largest_regression_percentage(),
+        },
+        secondary_improvements: ComparisonSummaryDetail {
+            count: secondary.num_improvements,
+            mean: secondary.arithmetic_mean_of_improvements(),
+            max: secondary.largest_improvement_percentage(),
+        },
+        secondary_regressions: ComparisonSummaryDetail {
+            count: secondary.num_regressions,
+            mean: secondary.arithmetic_mean_of_regressions(),
+            max: secondary.largest_regression_percentage(),
+        },
+        primary_all: ComparisonSummaryDetail {
+            count: primary.num_changes(),
+            mean: primary.arithmetic_mean_of_changes(),
+            max: primary
+                .largest_change()
+                .map(|c| c.relative_change() * 100.0),
+        },
+    }
 }
 
 async fn populate_report(
@@ -327,17 +369,17 @@ impl ArtifactComparisonSummary {
     }
 
     /// Arithmetic mean of all improvements as a percent
-    pub fn arithmetic_mean_of_improvements(&self) -> f64 {
+    pub fn arithmetic_mean_of_improvements(&self) -> Option<f64> {
         self.arithmetic_mean(self.improvements())
     }
 
     /// Arithmetic mean of all regressions as a percent
-    pub fn arithmetic_mean_of_regressions(&self) -> f64 {
+    pub fn arithmetic_mean_of_regressions(&self) -> Option<f64> {
         self.arithmetic_mean(self.regressions())
     }
 
     /// Arithmetic mean of all changes as a percent
-    pub fn arithmetic_mean_of_changes(&self) -> f64 {
+    pub fn arithmetic_mean_of_changes(&self) -> Option<f64> {
         self.arithmetic_mean(self.relevant_comparisons.iter())
     }
 
@@ -348,15 +390,18 @@ impl ArtifactComparisonSummary {
     fn arithmetic_mean<'a>(
         &'a self,
         changes: impl Iterator<Item = &'a TestResultComparison>,
-    ) -> f64 {
+    ) -> Option<f64> {
         let mut count = 0;
         let mut sum = 0.0;
         for r in changes {
             sum += r.relative_change();
             count += 1;
         }
+        if count == 0 {
+            return None;
+        }
 
-        (sum / count as f64) * 100.0
+        Some((sum / count as f64) * 100.0)
     }
 
     fn improvements(&self) -> impl Iterator<Item = &TestResultComparison> {
@@ -371,14 +416,22 @@ impl ArtifactComparisonSummary {
             .filter(|c| c.is_regression())
     }
 
-    fn largest_improvement(&self) -> Option<&TestResultComparison> {
+    fn largest_improvement_percentage(&self) -> Option<f64> {
         self.relevant_comparisons
             .iter()
             .find(|s| s.is_improvement())
+            .map(|c| c.relative_change() * 100.0)
     }
 
-    fn largest_regression(&self) -> Option<&TestResultComparison> {
-        self.relevant_comparisons.iter().find(|s| s.is_regression())
+    fn largest_regression_percentage(&self) -> Option<f64> {
+        self.relevant_comparisons
+            .iter()
+            .find(|s| s.is_regression())
+            .map(|c| c.relative_change() * 100.0)
+    }
+
+    pub fn largest_change(&self) -> Option<&TestResultComparison> {
+        self.relevant_comparisons.first()
     }
 
     /// The relevance level of the entire comparison
@@ -388,10 +441,6 @@ impl ArtifactComparisonSummary {
 
     pub fn num_changes(&self) -> usize {
         self.relevant_comparisons.len()
-    }
-
-    pub fn largest_change(&self) -> Option<&TestResultComparison> {
-        self.relevant_comparisons.first()
     }
 }
 
@@ -447,10 +496,8 @@ pub fn write_summary_table(
     with_footnotes: bool,
     result: &mut String,
 ) {
-    fn render_stat<F: FnOnce() -> Option<f64>>(count: usize, calculate: F) -> String {
-        let value = if count > 0 { calculate() } else { None };
-        value
-            .map(|value| format!("{value:.1}%"))
+    fn render_stat(stat: Option<f64>) -> String {
+        stat.map(|value| format!("{value:.1}%"))
             .unwrap_or_else(|| "N/A".to_string())
     }
 
@@ -500,36 +547,18 @@ pub fn write_summary_table(
     ]);
     render_row(vec![
         format!("mean{}", if with_footnotes { "[^2]" } else { "" }),
-        render_stat(primary.num_regressions, || {
-            Some(primary.arithmetic_mean_of_regressions())
-        }),
-        render_stat(secondary.num_regressions, || {
-            Some(secondary.arithmetic_mean_of_regressions())
-        }),
-        render_stat(primary.num_improvements, || {
-            Some(primary.arithmetic_mean_of_improvements())
-        }),
-        render_stat(secondary.num_improvements, || {
-            Some(secondary.arithmetic_mean_of_improvements())
-        }),
-        if primary.is_empty() {
-            "N/A".to_string()
-        } else {
-            format!("{:.1}%", primary.arithmetic_mean_of_changes())
-        },
+        render_stat(primary.arithmetic_mean_of_regressions()),
+        render_stat(secondary.arithmetic_mean_of_regressions()),
+        render_stat(primary.arithmetic_mean_of_improvements()),
+        render_stat(secondary.arithmetic_mean_of_improvements()),
+        render_stat(primary.arithmetic_mean_of_changes()),
     ]);
 
     let largest_change = if primary.is_empty() {
         "N/A".to_string()
     } else {
-        let largest_improvement = primary
-            .largest_improvement()
-            .map(|c| c.relative_change())
-            .unwrap_or(0.0);
-        let largest_regression = primary
-            .largest_regression()
-            .map(|c| c.relative_change())
-            .unwrap_or(0.0);
+        let largest_improvement = primary.largest_improvement_percentage().unwrap_or(0.0);
+        let largest_regression = primary.largest_regression_percentage().unwrap_or(0.0);
         let change = if largest_improvement
             .abs()
             .partial_cmp(&largest_regression.abs())
@@ -541,31 +570,15 @@ pub fn write_summary_table(
             largest_regression
         };
 
-        format!("{:.1}%", change * 100.0)
+        format!("{:.1}%", change)
     };
 
     render_row(vec![
         "max".to_string(),
-        render_stat(primary.num_regressions, || {
-            primary
-                .largest_regression()
-                .map(|r| r.relative_change() * 100.0)
-        }),
-        render_stat(secondary.num_regressions, || {
-            secondary
-                .largest_regression()
-                .map(|r| r.relative_change() * 100.0)
-        }),
-        render_stat(primary.num_improvements, || {
-            primary
-                .largest_improvement()
-                .map(|r| r.relative_change() * 100.0)
-        }),
-        render_stat(secondary.num_improvements, || {
-            secondary
-                .largest_improvement()
-                .map(|r| r.relative_change() * 100.0)
-        }),
+        render_stat(primary.largest_regression_percentage()),
+        render_stat(secondary.largest_regression_percentage()),
+        render_stat(primary.largest_improvement_percentage()),
+        render_stat(secondary.largest_improvement_percentage()),
         largest_change,
     ]);
 }

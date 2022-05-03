@@ -176,6 +176,23 @@ pub mod comparison {
         /// `b`).
         pub is_contiguous: bool,
         pub benchmark_data: Vec<BenchmarkInfo>,
+        pub summary: ComparisonSummary,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct ComparisonSummary {
+        pub primary_regressions: ComparisonSummaryDetail,
+        pub secondary_regressions: ComparisonSummaryDetail,
+        pub primary_improvements: ComparisonSummaryDetail,
+        pub secondary_improvements: ComparisonSummaryDetail,
+        pub primary_all: ComparisonSummaryDetail,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct ComparisonSummaryDetail {
+        pub count: usize,
+        pub mean: Option<f64>,
+        pub max: Option<f64>,
     }
 
     #[derive(Debug, Clone, Serialize)]
